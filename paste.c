@@ -157,10 +157,13 @@ paste_free(struct paste_buffer *pb)
  * that the caller is responsible for allocating data.
  */
 void
-paste_add(char *data, size_t size)
+paste_add(const char *prefix, char *data, size_t size)
 {
 	struct paste_buffer	*pb, *pb1;
 	u_int			 limit;
+
+	if (prefix == NULL)
+		prefix = "buffer";
 
 	if (size == 0) {
 		free(data);
@@ -180,7 +183,7 @@ paste_add(char *data, size_t size)
 	pb->name = NULL;
 	do {
 		free(pb->name);
-		xasprintf(&pb->name, "buffer%04u", paste_next_index);
+		xasprintf(&pb->name, "%s%u", prefix, paste_next_index);
 		paste_next_index++;
 	} while (paste_get_name(pb->name) != NULL);
 
@@ -262,7 +265,7 @@ paste_set(char *data, size_t size, const char *name, char **cause)
 		return (0);
 	}
 	if (name == NULL) {
-		paste_add(data, size);
+		paste_add(NULL, data, size);
 		return (0);
 	}
 
@@ -293,13 +296,22 @@ paste_set(char *data, size_t size, const char *name, char **cause)
 	return (0);
 }
 
+/* Set paste data without otherwise changing it. */
+void
+paste_replace(struct paste_buffer *pb, char *data, size_t size)
+{
+	free(pb->data);
+	pb->data = data;
+	pb->size = size;
+}
+
 /* Convert start of buffer into a nice string. */
 char *
 paste_make_sample(struct paste_buffer *pb)
 {
 	char		*buf;
 	size_t		 len, used;
-	const int	 flags = VIS_OCTAL|VIS_TAB|VIS_NL;
+	const int	 flags = VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL;
 	const size_t	 width = 200;
 
 	len = pb->size;

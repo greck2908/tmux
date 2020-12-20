@@ -27,6 +27,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(HAVE_NCURSES_H)
+#include <ncurses.h>
+#endif
+
 #include "tmux.h"
 
 struct tmuxproc {
@@ -35,6 +39,7 @@ struct tmuxproc {
 
 	void		(*signalcb)(int);
 
+	struct event	  ev_sigint;
 	struct event	  ev_sighup;
 	struct event	  ev_sigchld;
 	struct event	  ev_sigcont;
@@ -181,9 +186,20 @@ proc_start(const char *name)
 		memset(&u, 0, sizeof u);
 
 	log_debug("%s started (%ld): version %s, socket %s, protocol %d", name,
-	    (long)getpid(), VERSION, socket_path, PROTOCOL_VERSION);
-	log_debug("on %s %s %s; libevent %s (%s)", u.sysname, u.release,
-	    u.version, event_get_version(), event_get_method());
+	    (long)getpid(), getversion(), socket_path, PROTOCOL_VERSION);
+	log_debug("on %s %s %s", u.sysname, u.release, u.version);
+	log_debug("using libevent %s (%s)"
+#ifdef HAVE_UTF8PROC
+	    "; utf8proc %s"
+#endif
+#ifdef NCURSES_VERSION
+	    "; ncurses " NCURSES_VERSION
+#endif
+	    , event_get_version(), event_get_method()
+#ifdef HAVE_UTF8PROC
+	    , utf8proc_version ()
+#endif
+	);
 
 	tp = xcalloc(1, sizeof *tp);
 	tp->name = xstrdup(name);
@@ -219,10 +235,14 @@ proc_set_signals(struct tmuxproc *tp, void (*signalcb)(int))
 	sa.sa_flags = SA_RESTART;
 	sa.sa_handler = SIG_IGN;
 
-	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGPIPE, &sa, NULL);
 	sigaction(SIGTSTP, &sa, NULL);
+	sigaction(SIGTTIN, &sa, NULL);
+	sigaction(SIGTTOU, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
 
+	signal_set(&tp->ev_sigint, SIGINT, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigint, NULL);
 	signal_set(&tp->ev_sighup, SIGHUP, proc_signal_cb, tp);
 	signal_add(&tp->ev_sighup, NULL);
 	signal_set(&tp->ev_sigchld, SIGCHLD, proc_signal_cb, tp);
@@ -249,10 +269,10 @@ proc_clear_signals(struct tmuxproc *tp, int defaults)
 	sa.sa_flags = SA_RESTART;
 	sa.sa_handler = SIG_DFL;
 
-	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGPIPE, &sa, NULL);
 	sigaction(SIGTSTP, &sa, NULL);
 
+	signal_del(&tp->ev_sigint);
 	signal_del(&tp->ev_sighup);
 	signal_del(&tp->ev_sigchld);
 	signal_del(&tp->ev_sigcont);
@@ -262,6 +282,8 @@ proc_clear_signals(struct tmuxproc *tp, int defaults)
 	signal_del(&tp->ev_sigwinch);
 
 	if (defaults) {
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGQUIT, &sa, NULL);
 		sigaction(SIGHUP, &sa, NULL);
 		sigaction(SIGCHLD, &sa, NULL);
 		sigaction(SIGCONT, &sa, NULL);
