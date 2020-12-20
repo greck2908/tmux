@@ -84,26 +84,23 @@ const struct cmd_entry cmd_last_window_entry = {
 static enum cmd_retval
 cmd_select_window_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = cmd_get_args(self);
-	struct client		*c = cmdq_get_client(item);
-	struct cmd_find_state	*current = cmdq_get_current(item);
-	struct cmd_find_state	*target = cmdq_get_target(item);
-	struct winlink		*wl = target->wl;
-	struct session		*s = target->s;
+	struct cmd_find_state	*current = &item->shared->current;
+	struct winlink		*wl = item->target.wl;
+	struct session		*s = item->target.s;
 	int			 next, previous, last, activity;
 
-	next = (cmd_get_entry(self) == &cmd_next_window_entry);
-	if (args_has(args, 'n'))
+	next = self->entry == &cmd_next_window_entry;
+	if (args_has(self->args, 'n'))
 		next = 1;
-	previous = (cmd_get_entry(self) == &cmd_previous_window_entry);
-	if (args_has(args, 'p'))
+	previous = self->entry == &cmd_previous_window_entry;
+	if (args_has(self->args, 'p'))
 		previous = 1;
-	last = (cmd_get_entry(self) == &cmd_last_window_entry);
-	if (args_has(args, 'l'))
+	last = self->entry == &cmd_last_window_entry;
+	if (args_has(self->args, 'l'))
 		last = 1;
 
 	if (next || previous || last) {
-		activity = args_has(args, 'a');
+		activity = args_has(self->args, 'a');
 		if (next) {
 			if (session_next(s, activity) != 0) {
 				cmdq_error(item, "no next window");
@@ -122,13 +119,13 @@ cmd_select_window_exec(struct cmd *self, struct cmdq_item *item)
 		}
 		cmd_find_from_session(current, s, 0);
 		server_redraw_session(s);
-		cmdq_insert_hook(s, item, current, "after-select-window");
+		hooks_insert(s->hooks, item, current, "after-select-window");
 	} else {
 		/*
 		 * If -T and select-window is invoked on same window as
 		 * current, switch to previous window.
 		 */
-		if (args_has(args, 'T') && wl == s->curw) {
+		if (args_has(self->args, 'T') && wl == s->curw) {
 			if (session_last(s) != 0) {
 				cmdq_error(item, "no last window");
 				return (-1);
@@ -140,10 +137,8 @@ cmd_select_window_exec(struct cmd *self, struct cmdq_item *item)
 			cmd_find_from_session(current, s, 0);
 			server_redraw_session(s);
 		}
-		cmdq_insert_hook(s, item, current, "after-select-window");
+		hooks_insert(s->hooks, item, current, "after-select-window");
 	}
-	if (c != NULL && c->session != NULL)
-		s->curw->window->latest = c;
 	recalculate_sizes();
 
 	return (CMD_RETURN_NORMAL);

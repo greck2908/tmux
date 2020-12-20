@@ -30,9 +30,7 @@ char			*osdep_get_name(int, char *);
 char			*osdep_get_cwd(int);
 struct event_base	*osdep_event_init(void);
 
-#ifndef __unused
 #define __unused __attribute__ ((__unused__))
-#endif
 
 char *
 osdep_get_name(int fd, __unused char *tty)
@@ -49,7 +47,6 @@ osdep_get_name(int fd, __unused char *tty)
 			&bsdinfo, sizeof bsdinfo);
 	if (ret == sizeof bsdinfo && *bsdinfo.pbsi_comm != '\0')
 		return (strdup(bsdinfo.pbsi_comm));
-	return (NULL);
 #else
 	int	mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, 0 };
 	size_t	size;
@@ -61,7 +58,7 @@ osdep_get_name(int fd, __unused char *tty)
 	size = sizeof kp;
 	if (sysctl(mib, 4, &kp, &size, NULL, 0) == -1)
 		return (NULL);
-	if (size != (sizeof kp) || *kp.kp_proc.p_comm == '\0')
+	if (*kp.kp_proc.p_comm == '\0')
 		return (NULL);
 
 	return (strdup(kp.kp_proc.p_comm));

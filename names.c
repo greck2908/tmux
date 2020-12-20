@@ -96,7 +96,6 @@ check_window_name(struct window *w)
 	if (strcmp(name, w->name) != 0) {
 		log_debug("@%u new name %s (was %s)", w->id, name, w->name);
 		window_set_name(w, name);
-		server_redraw_window_borders(w);
 		server_status_window(w);
 	} else
 		log_debug("@%u name not changed (still %s)", w->id, w->name);
@@ -107,7 +106,7 @@ check_window_name(struct window *w)
 char *
 default_window_name(struct window *w)
 {
-	char	*cmd, *s;
+	char    *cmd, *s;
 
 	cmd = cmd_stringify_argv(w->active->argc, w->active->argv);
 	if (cmd != NULL && *cmd != '\0')
@@ -142,10 +141,6 @@ parse_window_name(const char *in)
 	char	*copy, *name, *ptr;
 
 	name = copy = xstrdup(in);
-	if (*name == '"')
-		name++;
-	name[strcspn (name, "\"")] = '\0';
-
 	if (strncmp(name, "exec ", (sizeof "exec ") - 1) == 0)
 		name = name + (sizeof "exec ") - 1;
 

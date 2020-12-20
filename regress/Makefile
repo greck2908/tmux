@@ -7,4 +7,3 @@ all: $(TESTS)
 
 $(TESTS):
 	sh $*.sh
-	sleep 1

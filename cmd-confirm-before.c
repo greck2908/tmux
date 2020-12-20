@@ -42,7 +42,7 @@ const struct cmd_entry cmd_confirm_before_entry = {
 	.args = { "p:t:", 1, 1 },
 	.usage = "[-p prompt] " CMD_TARGET_CLIENT_USAGE " command",
 
-	.flags = CMD_CLIENT_TFLAG,
+	.flags = 0,
 	.exec = cmd_confirm_before_exec
 };
 
@@ -53,12 +53,14 @@ struct cmd_confirm_before_data {
 static enum cmd_retval
 cmd_confirm_before_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args			*args = cmd_get_args(self);
+	struct args			*args = self->args;
 	struct cmd_confirm_before_data	*cdata;
-	struct client			*tc = cmdq_get_target_client(item);
-	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct client			*c;
 	char				*cmd, *copy, *new_prompt, *ptr;
 	const char			*prompt;
+
+	if ((c = cmd_find_client(item, args_get(args, 't'), 0)) == NULL)
+		return (CMD_RETURN_ERROR);
 
 	if ((prompt = args_get(args, 'p')) != NULL)
 		xasprintf(&new_prompt, "%s ", prompt);
@@ -72,11 +74,22 @@ cmd_confirm_before_exec(struct cmd *self, struct cmdq_item *item)
 	cdata = xmalloc(sizeof *cdata);
 	cdata->cmd = xstrdup(args->argv[0]);
 
-	status_prompt_set(tc, target, new_prompt, NULL,
+	status_prompt_set(c, new_prompt, NULL,
 	    cmd_confirm_before_callback, cmd_confirm_before_free, cdata,
 	    PROMPT_SINGLE);
 
 	free(new_prompt);
+	return (CMD_RETURN_NORMAL);
+}
+
+static enum cmd_retval
+cmd_confirm_before_error(struct cmdq_item *item, void *data)
+{
+	char	*error = data;
+
+	cmdq_error(item, "%s", error);
+	free(error);
+
 	return (CMD_RETURN_NORMAL);
 }
 
@@ -85,22 +98,32 @@ cmd_confirm_before_callback(struct client *c, void *data, const char *s,
     __unused int done)
 {
 	struct cmd_confirm_before_data	*cdata = data;
-	char				*error;
-	enum cmd_parse_status		 status;
+	struct cmd_list			*cmdlist;
+	struct cmdq_item		*new_item;
+	char				*cause;
 
 	if (c->flags & CLIENT_DEAD)
 		return (0);
 
 	if (s == NULL || *s == '\0')
 		return (0);
-	if (tolower((u_char)s[0]) != 'y' || s[1] != '\0')
+	if (tolower((u_char) s[0]) != 'y' || s[1] != '\0')
 		return (0);
 
-	status = cmd_parse_and_append(cdata->cmd, NULL, c, NULL, &error);
-	if (status == CMD_PARSE_ERROR) {
-		cmdq_append(c, cmdq_get_error(error));
-		free(error);
+	cmdlist = cmd_string_parse(cdata->cmd, NULL, 0, &cause);
+	if (cmdlist == NULL) {
+		if (cause != NULL) {
+			new_item = cmdq_get_callback(cmd_confirm_before_error,
+			    cause);
+		} else
+			new_item = NULL;
+	} else {
+		new_item = cmdq_get_command(cmdlist, NULL, NULL, 0);
+		cmd_list_free(cmdlist);
 	}
+
+	if (new_item != NULL)
+		cmdq_append(c, new_item);
 
 	return (0);
 }

@@ -38,8 +38,8 @@ const struct cmd_entry cmd_show_environment_entry = {
 	.name = "show-environment",
 	.alias = "showenv",
 
-	.args = { "hgst:", 0, 1 },
-	.usage = "[-hgs] " CMD_TARGET_SESSION_USAGE " [name]",
+	.args = { "gst:", 0, 1 },
+	.usage = "[-gs] " CMD_TARGET_SESSION_USAGE " [name]",
 
 	.target = { 't', CMD_FIND_SESSION, CMD_FIND_CANFAIL },
 
@@ -69,15 +69,9 @@ static void
 cmd_show_environment_print(struct cmd *self, struct cmdq_item *item,
     struct environ_entry *envent)
 {
-	struct args	*args = cmd_get_args(self);
-	char		*escaped;
+	char	*escaped;
 
-	if (!args_has(args, 'h') && (envent->flags & ENVIRON_HIDDEN))
-		return;
-	if (args_has(args, 'h') && (~envent->flags & ENVIRON_HIDDEN))
-		return;
-
-	if (!args_has(args, 's')) {
+	if (!args_has(self->args, 's')) {
 		if (envent->value != NULL)
 			cmdq_print(item, "%s=%s", envent->name, envent->value);
 		else
@@ -97,31 +91,30 @@ cmd_show_environment_print(struct cmd *self, struct cmdq_item *item,
 static enum cmd_retval
 cmd_show_environment_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = cmd_get_args(self);
-	struct cmd_find_state	*target = cmdq_get_target(item);
+	struct args		*args = self->args;
 	struct environ		*env;
 	struct environ_entry	*envent;
-	const char		*tflag;
+	const char		*target;
 
-	if ((tflag = args_get(args, 't')) != NULL) {
-		if (target->s == NULL) {
-			cmdq_error(item, "no such session: %s", tflag);
+	if ((target = args_get(args, 't')) != NULL) {
+		if (item->target.s == NULL) {
+			cmdq_error(item, "no such session: %s", target);
 			return (CMD_RETURN_ERROR);
 		}
 	}
 
-	if (args_has(args, 'g'))
+	if (args_has(self->args, 'g'))
 		env = global_environ;
 	else {
-		if (target->s == NULL) {
-			tflag = args_get(args, 't');
-			if (tflag != NULL)
-				cmdq_error(item, "no such session: %s", tflag);
+		if (item->target.s == NULL) {
+			target = args_get(args, 't');
+			if (target != NULL)
+				cmdq_error(item, "no such session: %s", target);
 			else
 				cmdq_error(item, "no current session");
 			return (CMD_RETURN_ERROR);
 		}
-		env = target->s->environ;
+		env = item->target.s->environ;
 	}
 
 	if (args->argc != 0) {

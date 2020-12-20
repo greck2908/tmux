@@ -43,15 +43,11 @@
 struct clients		 clients;
 
 struct tmuxproc		*server_proc;
-static int		 server_fd = -1;
-static uint64_t		 server_client_flags;
+static int		 server_fd;
 static int		 server_exit;
 static struct event	 server_ev_accept;
 
 struct cmd_find_state	 marked_pane;
-
-static u_int		 message_next;
-struct message_list	 message_log;
 
 static int	server_loop(void);
 static void	server_send_exit(void);
@@ -101,7 +97,7 @@ server_check_marked(void)
 
 /* Create server socket. */
 static int
-server_create_socket(int flags, char **cause)
+server_create_socket(char **cause)
 {
 	struct sockaddr_un	sa;
 	size_t			size;
@@ -120,10 +116,7 @@ server_create_socket(int flags, char **cause)
 	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
 		goto fail;
 
-	if (flags & CLIENT_DEFAULTSOCKET)
-		mask = umask(S_IXUSR|S_IXGRP|S_IRWXO);
-	else
-		mask = umask(S_IXUSR|S_IRWXG|S_IRWXO);
+	mask = umask(S_IXUSR|S_IXGRP|S_IRWXO);
 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) == -1) {
 		saved_errno = errno;
 		close(fd);
@@ -150,45 +143,50 @@ fail:
 	return (-1);
 }
 
+/* Server error callback. */
+static enum cmd_retval
+server_start_error(struct cmdq_item *item, void *data)
+{
+	char	*error = data;
+
+	cmdq_error(item, "%s", error);
+	free(error);
+
+	return (CMD_RETURN_NORMAL);
+}
+
 /* Fork new server. */
 int
-server_start(struct tmuxproc *client, int flags, struct event_base *base,
-    int lockfd, char *lockfile)
+server_start(struct tmuxproc *client, struct event_base *base, int lockfd,
+    char *lockfile)
 {
 	int		 pair[2];
 	sigset_t	 set, oldset;
-	struct client	*c = NULL;
+	struct client	*c;
 	char		*cause = NULL;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, pair) != 0)
+		fatal("socketpair failed");
 
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
-
-	if (~flags & CLIENT_NOFORK) {
-		if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, pair) != 0)
-			fatal("socketpair failed");
-
-		switch (fork()) {
-		case -1:
-			fatal("fork failed");
-		case 0:
-			break;
-		default:
-			sigprocmask(SIG_SETMASK, &oldset, NULL);
-			close(pair[1]);
-			return (pair[0]);
-		}
-		close(pair[0]);
-		if (daemon(1, 0) != 0)
-			fatal("daemon failed");
+	switch (fork()) {
+	case -1:
+		fatal("fork failed");
+	case 0:
+		break;
+	default:
+		sigprocmask(SIG_SETMASK, &oldset, NULL);
+		close(pair[1]);
+		return (pair[0]);
 	}
-
-	server_client_flags = flags;
+	close(pair[0]);
+	if (daemon(1, 0) != 0)
+		fatal("daemon failed");
 	proc_clear_signals(client, 0);
-
 	if (event_reinit(base) != 0)
 		fatalx("event_reinit failed");
 	server_proc = proc_start("server");
-
 	proc_set_signals(server_proc, server_signal);
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
 
@@ -198,23 +196,18 @@ server_start(struct tmuxproc *client, int flags, struct event_base *base,
 	    "tty ps", NULL) != 0)
 		fatal("pledge failed");
 
-	input_key_build();
 	RB_INIT(&windows);
 	RB_INIT(&all_window_panes);
 	TAILQ_INIT(&clients);
 	RB_INIT(&sessions);
 	key_bindings_init();
-	TAILQ_INIT(&message_log);
 
 	gettimeofday(&start_time, NULL);
 
-	server_fd = server_create_socket(flags, &cause);
+	server_fd = server_create_socket(&cause);
 	if (server_fd != -1)
 		server_update_socket();
-	if (~flags & CLIENT_NOFORK)
-		c = server_client_create(pair[1]);
-	else
-		options_set_number(global_options, "exit-empty", 0);
+	c = server_client_create(pair[1]);
 
 	if (lockfd >= 0) {
 		unlink(lockfile);
@@ -223,14 +216,13 @@ server_start(struct tmuxproc *client, int flags, struct event_base *base,
 	}
 
 	if (cause != NULL) {
-		if (c != NULL) {
-			cmdq_append(c, cmdq_get_error(cause));
-			c->flags |= CLIENT_EXIT;
-		}
-		free(cause);
+		cmdq_append(c, cmdq_get_callback(server_start_error, cause));
+		c->flags |= CLIENT_EXIT;
 	}
 
+	start_cfg();
 	server_add_accept(0);
+
 	proc_loop(server_proc, server_loop);
 
 	job_kill_all();
@@ -296,14 +288,15 @@ server_send_exit(void)
 		if (c->flags & CLIENT_SUSPENDED)
 			server_client_lost(c);
 		else {
-			c->flags |= CLIENT_EXIT;
-			c->exit_type = CLIENT_EXIT_SHUTDOWN;
+			if (c->flags & CLIENT_ATTACHED)
+				notify_client("client-detached", c);
+			proc_send(c->peer, MSG_SHUTDOWN, -1, NULL, 0);
 		}
 		c->session = NULL;
 	}
 
 	RB_FOREACH_SAFE(s, sessions, &sessions, s1)
-		session_destroy(s, 1, __func__);
+		session_destroy(s, __func__);
 }
 
 /* Update socket execute permissions based on whether sessions are attached. */
@@ -381,9 +374,6 @@ server_add_accept(int timeout)
 {
 	struct timeval tv = { timeout, 0 };
 
-	if (server_fd == -1)
-		return;
-
 	if (event_initialized(&server_ev_accept))
 		event_del(&server_ev_accept);
 
@@ -406,7 +396,6 @@ server_signal(int sig)
 
 	log_debug("%s: %s", __func__, strsignal(sig));
 	switch (sig) {
-	case SIGINT:
 	case SIGTERM:
 		server_exit = 1;
 		server_send_exit();
@@ -416,7 +405,7 @@ server_signal(int sig)
 		break;
 	case SIGUSR1:
 		event_del(&server_ev_accept);
-		fd = server_create_socket(server_client_flags, NULL);
+		fd = server_create_socket(NULL);
 		if (fd != -1) {
 			close(server_fd);
 			server_fd = fd;
@@ -495,37 +484,5 @@ server_child_stopped(pid_t pid, int status)
 					kill(pid, SIGCONT);
 			}
 		}
-	}
-	job_check_died(pid, status);
-}
-
-/* Add to message log. */
-void
-server_add_message(const char *fmt, ...)
-{
-	struct message_entry	*msg, *msg1;
-	char			*s;
-	va_list			 ap;
-	u_int			 limit;
-
-	va_start(ap, fmt);
-	xvasprintf(&s, fmt, ap);
-	va_end(ap);
-
-	log_debug("message: %s", s);
-
-	msg = xcalloc(1, sizeof *msg);
-	gettimeofday(&msg->msg_time, NULL);
-	msg->msg_num = message_next++;
-	msg->msg = s;
-	TAILQ_INSERT_TAIL(&message_log, msg, entry);
-
-	limit = options_get_number(global_options, "message-limit");
-	TAILQ_FOREACH_SAFE(msg, &message_log, entry, msg1) {
-		if (msg->msg_num + limit >= message_next)
-			break;
-		free(msg->msg);
-		TAILQ_REMOVE(&message_log, msg, entry);
-		free(msg);
 	}
 }

@@ -17,9 +17,7 @@
  */
 
 #include <sys/types.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -70,15 +68,18 @@ static LIST_HEAD(joblist, job) all_jobs = LIST_HEAD_INITIALIZER(all_jobs);
 struct job *
 job_run(const char *cmd, struct session *s, const char *cwd,
     job_update_cb updatecb, job_complete_cb completecb, job_free_cb freecb,
-    void *data, int flags, int sx, int sy)
+    void *data, int flags)
 {
 	struct job	*job;
 	struct environ	*env;
 	pid_t		 pid;
-	int		 nullfd, out[2], master;
+	int		 nullfd, out[2];
 	const char	*home;
 	sigset_t	 set, oldset;
-	struct winsize	 ws;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, out) != 0)
+		return (NULL);
+	log_debug("%s: cmd=%s, cwd=%s", __func__, cmd, cwd == NULL ? "" : cwd);
 
 	/*
 	 * Do not set TERM during .tmux.conf, it is nice to be able to use
@@ -88,26 +89,13 @@ job_run(const char *cmd, struct session *s, const char *cwd,
 
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
-
-	if (flags & JOB_PTY) {
-		memset(&ws, 0, sizeof ws);
-		ws.ws_col = sx;
-		ws.ws_row = sy;
-		pid = fdforkpty(ptm_fd, &master, NULL, NULL, &ws);
-	} else {
-		if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, out) != 0)
-			goto fail;
-		pid = fork();
-	}
-	log_debug("%s: cmd=%s, cwd=%s", __func__, cmd, cwd == NULL ? "" : cwd);
-
-	switch (pid) {
+	switch (pid = fork()) {
 	case -1:
-		if (~flags & JOB_PTY) {
-			close(out[0]);
-			close(out[1]);
-		}
-		goto fail;
+		sigprocmask(SIG_SETMASK, &oldset, NULL);
+		environ_free(env);
+		close(out[0]);
+		close(out[1]);
+		return (NULL);
 	case 0:
 		proc_clear_signals(server_proc, 1);
 		sigprocmask(SIG_SETMASK, &oldset, NULL);
@@ -120,23 +108,22 @@ job_run(const char *cmd, struct session *s, const char *cwd,
 		environ_push(env);
 		environ_free(env);
 
-		if (~flags & JOB_PTY) {
-			if (dup2(out[1], STDIN_FILENO) == -1)
-				fatal("dup2 failed");
-			if (dup2(out[1], STDOUT_FILENO) == -1)
-				fatal("dup2 failed");
-			if (out[1] != STDIN_FILENO && out[1] != STDOUT_FILENO)
-				close(out[1]);
-			close(out[0]);
+		if (dup2(out[1], STDIN_FILENO) == -1)
+			fatal("dup2 failed");
+		if (dup2(out[1], STDOUT_FILENO) == -1)
+			fatal("dup2 failed");
+		if (out[1] != STDIN_FILENO && out[1] != STDOUT_FILENO)
+			close(out[1]);
+		close(out[0]);
 
-			nullfd = open(_PATH_DEVNULL, O_RDWR, 0);
-			if (nullfd == -1)
-				fatal("open failed");
-			if (dup2(nullfd, STDERR_FILENO) == -1)
-				fatal("dup2 failed");
-			if (nullfd != STDERR_FILENO)
-				close(nullfd);
-		}
+		nullfd = open(_PATH_DEVNULL, O_RDWR, 0);
+		if (nullfd < 0)
+			fatal("open failed");
+		if (dup2(nullfd, STDERR_FILENO) == -1)
+			fatal("dup2 failed");
+		if (nullfd != STDERR_FILENO)
+			close(nullfd);
+
 		closefrom(STDERR_FILENO + 1);
 
 		execl(_PATH_BSHELL, "sh", "-c", cmd, (char *) NULL);
@@ -145,6 +132,7 @@ job_run(const char *cmd, struct session *s, const char *cwd,
 
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
 	environ_free(env);
+	close(out[1]);
 
 	job = xmalloc(sizeof *job);
 	job->state = JOB_RUNNING;
@@ -161,26 +149,15 @@ job_run(const char *cmd, struct session *s, const char *cwd,
 	job->freecb = freecb;
 	job->data = data;
 
-	if (~flags & JOB_PTY) {
-		close(out[1]);
-		job->fd = out[0];
-	} else
-		job->fd = master;
+	job->fd = out[0];
 	setblocking(job->fd, 0);
 
 	job->event = bufferevent_new(job->fd, job_read_callback,
 	    job_write_callback, job_error_callback, job);
-	if (job->event == NULL)
-		fatalx("out of memory");
 	bufferevent_enable(job->event, EV_READ|EV_WRITE);
 
 	log_debug("run job %p: %s, pid %ld", job, job->cmd, (long) job->pid);
 	return (job);
-
-fail:
-	sigprocmask(SIG_SETMASK, &oldset, NULL);
-	environ_free(env);
-	return (NULL);
 }
 
 /* Kill and free an individual job. */
@@ -203,24 +180,6 @@ job_free(struct job *job)
 		close(job->fd);
 
 	free(job);
-}
-
-/* Resize job. */
-void
-job_resize(struct job *job, u_int sx, u_int sy)
-{
-	struct winsize	 ws;
-
-	if (job->fd == -1 || (~job->flags & JOB_PTY))
-		return;
-
-	log_debug("resize job %p: %ux%u", job, sx, sy);
-
-	memset(&ws, 0, sizeof ws);
-	ws.ws_col = sx;
-	ws.ws_row = sy;
-	if (ioctl(job->fd, TIOCSWINSZ, &ws) == -1)
-		fatal("ioctl failed");
 }
 
 /* Job buffer read callback. */
@@ -247,7 +206,7 @@ job_write_callback(__unused struct bufferevent *bufev, void *data)
 	log_debug("job write %p: %s, pid %ld, output left %zu", job, job->cmd,
 	    (long) job->pid, len);
 
-	if (len == 0 && (~job->flags & JOB_KEEPWRITE)) {
+	if (len == 0) {
 		shutdown(job->fd, SHUT_WR);
 		bufferevent_disable(job->event, EV_WRITE);
 	}
@@ -284,12 +243,6 @@ job_check_died(pid_t pid, int status)
 	}
 	if (job == NULL)
 		return;
-	if (WIFSTOPPED(status)) {
-		if (WSTOPSIG(status) == SIGTTIN || WSTOPSIG(status) == SIGTTOU)
-			return;
-		killpg(job->pid, SIGCONT);
-		return;
-	}
 	log_debug("job died %p: %s, pid %ld", job, job->cmd, (long) job->pid);
 
 	job->status = status;

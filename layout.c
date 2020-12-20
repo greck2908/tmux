@@ -39,6 +39,7 @@ static int	layout_resize_pane_grow(struct window *, struct layout_cell *,
 		    enum layout_type, int, int);
 static int	layout_resize_pane_shrink(struct window *, struct layout_cell *,
 		    enum layout_type, int);
+static int	layout_need_status(struct layout_cell *, int);
 static u_int	layout_new_pane_size(struct window *, u_int,
 		    struct layout_cell *, enum layout_type, u_int, u_int,
 		    u_int);
@@ -198,9 +199,9 @@ layout_make_node(struct layout_cell *lc, enum layout_type type)
 	lc->wp = NULL;
 }
 
-/* Fix cell offsets for a child cell. */
-static void
-layout_fix_offsets1(struct layout_cell *lc)
+/* Fix cell offsets based on their sizes. */
+void
+layout_fix_offsets(struct layout_cell *lc)
 {
 	struct layout_cell	*lcchild;
 	u_int			 xoff, yoff;
@@ -211,7 +212,7 @@ layout_fix_offsets1(struct layout_cell *lc)
 			lcchild->xoff = xoff;
 			lcchild->yoff = lc->yoff;
 			if (lcchild->type != LAYOUT_WINDOWPANE)
-				layout_fix_offsets1(lcchild);
+				layout_fix_offsets(lcchild);
 			xoff += lcchild->sx + 1;
 		}
 	} else {
@@ -220,68 +221,34 @@ layout_fix_offsets1(struct layout_cell *lc)
 			lcchild->xoff = lc->xoff;
 			lcchild->yoff = yoff;
 			if (lcchild->type != LAYOUT_WINDOWPANE)
-				layout_fix_offsets1(lcchild);
+				layout_fix_offsets(lcchild);
 			yoff += lcchild->sy + 1;
 		}
 	}
 }
 
-/* Update cell offsets based on their sizes. */
-void
-layout_fix_offsets(struct window *w)
-{
-	struct layout_cell      *lc = w->layout_root;
-
-	lc->xoff = 0;
-	lc->yoff = 0;
-
-	layout_fix_offsets1(lc);
-}
-
-/* Is this a top cell? */
-static int
-layout_cell_is_top(struct window *w, struct layout_cell *lc)
-{
-	struct layout_cell	*next;
-
-	while (lc != w->layout_root) {
-		next = lc->parent;
-		if (next->type == LAYOUT_TOPBOTTOM &&
-		    lc != TAILQ_FIRST(&next->cells))
-			return (0);
-		lc = next;
-	}
-	return (1);
-}
-
-/* Is this a bottom cell? */
-static int
-layout_cell_is_bottom(struct window *w, struct layout_cell *lc)
-{
-	struct layout_cell	*next;
-
-	while (lc != w->layout_root) {
-		next = lc->parent;
-		if (next->type == LAYOUT_TOPBOTTOM &&
-		    lc != TAILQ_LAST(&next->cells, layout_cells))
-			return (0);
-		lc = next;
-	}
-	return (1);
-}
-
 /*
- * Returns 1 if we need to add an extra line for the pane status line. This is
- * the case for the most upper or lower panes only.
+ * Returns 1 if we need to reserve space for the pane status line. This is the
+ * case for the most upper panes only.
  */
 static int
-layout_add_border(struct window *w, struct layout_cell *lc, int status)
+layout_need_status(struct layout_cell *lc, int at_top)
 {
-	if (status == PANE_STATUS_TOP)
-		return (layout_cell_is_top(w, lc));
-	if (status == PANE_STATUS_BOTTOM)
-		return (layout_cell_is_bottom(w, lc));
-	return (0);
+	struct layout_cell	*first_lc;
+
+	if (lc->parent != NULL) {
+		if (lc->parent->type == LAYOUT_LEFTRIGHT)
+			return (layout_need_status(lc->parent, at_top));
+
+		if (at_top)
+			first_lc = TAILQ_FIRST(&lc->parent->cells);
+		else
+			first_lc = TAILQ_LAST(&lc->parent->cells,layout_cells);
+		if (lc == first_lc)
+			return (layout_need_status(lc->parent, at_top));
+		return (0);
+	}
+	return (1);
 }
 
 /* Update pane offsets and sizes based on their cells. */
@@ -290,22 +257,25 @@ layout_fix_panes(struct window *w)
 {
 	struct window_pane	*wp;
 	struct layout_cell	*lc;
-	int			 status;
+	int			 shift, status;
 
 	status = options_get_number(w->options, "pane-border-status");
 	TAILQ_FOREACH(wp, &w->panes, entry) {
 		if ((lc = wp->layout_cell) == NULL)
 			continue;
 
+		if (status != 0)
+			shift = layout_need_status(lc, status == 1);
+		else
+			shift = 0;
+
 		wp->xoff = lc->xoff;
 		wp->yoff = lc->yoff;
 
-		if (layout_add_border(w, lc, status)) {
-			if (status == PANE_STATUS_TOP)
-				wp->yoff++;
-			window_pane_resize(wp, lc->sx, lc->sy - 1);
-		} else
-			window_pane_resize(wp, lc->sx, lc->sy);
+		if (shift && status == 1)
+			wp->yoff += 1;
+
+		window_pane_resize(wp, lc->sx, lc->sy - shift);
 	}
 }
 
@@ -342,15 +312,13 @@ layout_resize_check(struct window *w, struct layout_cell *lc,
 	status = options_get_number(w->options, "pane-border-status");
 	if (lc->type == LAYOUT_WINDOWPANE) {
 		/* Space available in this cell only. */
-		if (type == LAYOUT_LEFTRIGHT) {
+		minimum = PANE_MINIMUM;
+		if (type == LAYOUT_LEFTRIGHT)
 			available = lc->sx;
-			minimum = PANE_MINIMUM;
-		} else {
+		else {
 			available = lc->sy;
-			if (layout_add_border(w, lc, status))
-				minimum = PANE_MINIMUM + 1;
-			else
-				minimum = PANE_MINIMUM;
+			if (status != 0)
+				minimum += layout_need_status(lc, status == 1);
 		}
 		if (available > minimum)
 			available -= minimum;
@@ -446,9 +414,9 @@ layout_destroy_cell(struct window *w, struct layout_cell *lc,
 		lcother = TAILQ_NEXT(lc, entry);
 	else
 		lcother = TAILQ_PREV(lc, layout_cells, entry);
-	if (lcother != NULL && lcparent->type == LAYOUT_LEFTRIGHT)
+	if (lcparent->type == LAYOUT_LEFTRIGHT)
 		layout_resize_adjust(w, lcother, lcparent->type, lc->sx + 1);
-	else if (lcother != NULL)
+	else
 		layout_resize_adjust(w, lcother, lcparent->type, lc->sy + 1);
 
 	/* Remove this from the parent's list. */
@@ -511,7 +479,7 @@ layout_resize(struct window *w, u_int sx, u_int sy)
 	 * out proportionately - this should leave the layout fitting the new
 	 * window size.
 	 */
-	xchange = sx - lc->sx;
+	xchange = sx - w->sx;
 	xlimit = layout_resize_check(w, lc, LAYOUT_LEFTRIGHT);
 	if (xchange < 0 && xchange < -xlimit)
 		xchange = -xlimit;
@@ -525,7 +493,7 @@ layout_resize(struct window *w, u_int sx, u_int sy)
 		layout_resize_adjust(w, lc, LAYOUT_LEFTRIGHT, xchange);
 
 	/* Adjust vertically in a similar fashion. */
-	ychange = sy - lc->sy;
+	ychange = sy - w->sy;
 	ylimit = layout_resize_check(w, lc, LAYOUT_TOPBOTTOM);
 	if (ychange < 0 && ychange < -ylimit)
 		ychange = -ylimit;
@@ -539,7 +507,7 @@ layout_resize(struct window *w, u_int sx, u_int sy)
 		layout_resize_adjust(w, lc, LAYOUT_TOPBOTTOM, ychange);
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(w);
+	layout_fix_offsets(lc);
 	layout_fix_panes(w);
 }
 
@@ -599,7 +567,7 @@ layout_resize_layout(struct window *w, struct layout_cell *lc,
 	}
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(w);
+	layout_fix_offsets(w->layout_root);
 	layout_fix_panes(w);
 	notify_window("window-layout-changed", w);
 }
@@ -754,7 +722,7 @@ layout_set_size_check(struct window *w, struct layout_cell *lc,
     enum layout_type type, int size)
 {
 	struct layout_cell	*lcchild;
-	u_int			 new_size, available, previous, count, idx;
+	u_int			new_size, available, previous, count, idx;
 
 	/* Cells with no children must just be bigger than minimum. */
 	if (lc->type == LAYOUT_WINDOWPANE)
@@ -768,9 +736,6 @@ layout_set_size_check(struct window *w, struct layout_cell *lc,
 
 	/* Check new size will work for each child. */
 	if (lc->type == type) {
-		if (available < (count * 2) - 1)
-			return (0);
-
 		if (type == LAYOUT_LEFTRIGHT)
 			previous = lc->sx;
 		else
@@ -780,17 +745,13 @@ layout_set_size_check(struct window *w, struct layout_cell *lc,
 		TAILQ_FOREACH(lcchild, &lc->cells, entry) {
 			new_size = layout_new_pane_size(w, previous, lcchild,
 			    type, size, count - idx, available);
-			if (idx == count - 1) {
-				if (new_size > available)
-					return (0);
-				available -= new_size;
-			} else {
-				if (new_size + 1 > available)
-					return (0);
-				available -= new_size + 1;
-			}
+			if (new_size > available)
+				return (0);
+
+			available -= (new_size + 1);
 			if (!layout_set_size_check(w, lcchild, type, new_size))
 				return (0);
+
 			idx++;
 		}
 	} else {
@@ -863,12 +824,11 @@ layout_resize_child_cells(struct window *w, struct layout_cell *lc)
  */
 struct layout_cell *
 layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
-    int flags)
+    int insert_before, int full_size)
 {
 	struct layout_cell     *lc, *lcparent, *lcnew, *lc1, *lc2;
-	u_int			sx, sy, xoff, yoff, size1, size2, minimum;
+	u_int			sx, sy, xoff, yoff, size1, size2;
 	u_int			new_size, saved_size, resize_first = 0;
-	int			full_size = (flags & SPAWN_FULLSIZE), status;
 
 	/*
 	 * If full_size is specified, add a new cell at the top of the window
@@ -878,7 +838,6 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 		lc = wp->window->layout_root;
 	else
 		lc = wp->layout_cell;
-	status = options_get_number(wp->window->options, "pane-border-status");
 
 	/* Copy the old cell size. */
 	sx = lc->sx;
@@ -893,11 +852,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 			return (NULL);
 		break;
 	case LAYOUT_TOPBOTTOM:
-		if (layout_add_border(wp->window, lc, status))
-			minimum = PANE_MINIMUM * 2 + 2;
-		else
-			minimum = PANE_MINIMUM * 2 + 1;
-		if (sy < minimum)
+		if (sy < PANE_MINIMUM * 2 + 1)
 			return (NULL);
 		break;
 	default:
@@ -914,7 +869,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 		saved_size = sy;
 	if (size < 0)
 		size2 = ((saved_size + 1) / 2) - 1;
-	else if (flags & SPAWN_BEFORE)
+	else if (insert_before)
 		size2 = saved_size - size - 1;
 	else
 		size2 = size;
@@ -925,7 +880,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 	size1 = saved_size - 1 - size2;
 
 	/* Which size are we using? */
-	if (flags & SPAWN_BEFORE)
+	if (insert_before)
 		new_size = size2;
 	else
 		new_size = size1;
@@ -941,7 +896,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 		 */
 		lcparent = lc->parent;
 		lcnew = layout_create_cell(lcparent);
-		if (flags & SPAWN_BEFORE)
+		if (insert_before)
 			TAILQ_INSERT_BEFORE(lc, lcnew, entry);
 		else
 			TAILQ_INSERT_AFTER(&lcparent->cells, lc, lcnew, entry);
@@ -970,7 +925,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 			layout_set_size(lcnew, size, sy, 0, 0);
 		else if (lc->type == LAYOUT_TOPBOTTOM)
 			layout_set_size(lcnew, sx, size, 0, 0);
-		if (flags & SPAWN_BEFORE)
+		if (insert_before)
 			TAILQ_INSERT_HEAD(&lc->cells, lcnew, entry);
 		else
 			TAILQ_INSERT_TAIL(&lc->cells, lcnew, entry);
@@ -994,12 +949,12 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 
 		/* Create the new child cell. */
 		lcnew = layout_create_cell(lcparent);
-		if (flags & SPAWN_BEFORE)
+		if (insert_before)
 			TAILQ_INSERT_HEAD(&lcparent->cells, lcnew, entry);
 		else
 			TAILQ_INSERT_TAIL(&lcparent->cells, lcnew, entry);
 	}
-	if (flags & SPAWN_BEFORE) {
+	if (insert_before) {
 		lc1 = lcnew;
 		lc2 = lc;
 	} else {
@@ -1021,7 +976,7 @@ layout_split_pane(struct window_pane *wp, enum layout_type type, int size,
 	if (full_size) {
 		if (!resize_first)
 			layout_resize_child_cells(wp->window, lc);
-		layout_fix_offsets(wp->window);
+		layout_fix_offsets(wp->window->layout_root);
 	} else
 		layout_make_leaf(lc, wp);
 
@@ -1039,7 +994,7 @@ layout_close_pane(struct window_pane *wp)
 
 	/* Fix pane offsets and sizes. */
 	if (w->layout_root != NULL) {
-		layout_fix_offsets(w);
+		layout_fix_offsets(w->layout_root);
 		layout_fix_panes(w);
 	}
 	notify_window("window-layout-changed", w);
@@ -1049,30 +1004,22 @@ int
 layout_spread_cell(struct window *w, struct layout_cell *parent)
 {
 	struct layout_cell	*lc;
-	u_int			 number, each, size, this;
-	int			 change, changed, status;
+	u_int			 number, each, size;
+	int			 change, changed;
 
 	number = 0;
 	TAILQ_FOREACH (lc, &parent->cells, entry)
-		number++;
+	    number++;
 	if (number <= 1)
 		return (0);
-	status = options_get_number(w->options, "pane-border-status");
 
 	if (parent->type == LAYOUT_LEFTRIGHT)
 		size = parent->sx;
-	else if (parent->type == LAYOUT_TOPBOTTOM) {
-		if (layout_add_border(w, parent, status))
-			size = parent->sy - 1;
-		else
-			size = parent->sy;
-	} else
-		return (0);
-	if (size < number - 1)
+	else if (parent->type == LAYOUT_TOPBOTTOM)
+		size = parent->sy;
+	else
 		return (0);
 	each = (size - (number - 1)) / number;
-	if (each == 0)
-		return (0);
 
 	changed = 0;
 	TAILQ_FOREACH (lc, &parent->cells, entry) {
@@ -1083,11 +1030,7 @@ layout_spread_cell(struct window *w, struct layout_cell *parent)
 			change = each - (int)lc->sx;
 			layout_resize_adjust(w, lc, LAYOUT_LEFTRIGHT, change);
 		} else if (parent->type == LAYOUT_TOPBOTTOM) {
-			if (layout_add_border(w, lc, status))
-				this = each + 1;
-			else
-				this = each;
-			change = this - (int)lc->sy;
+			change = each - (int)lc->sy;
 			layout_resize_adjust(w, lc, LAYOUT_TOPBOTTOM, change);
 		}
 		if (change != 0)
@@ -1108,7 +1051,7 @@ layout_spread_out(struct window_pane *wp)
 
 	do {
 		if (layout_spread_cell(w, parent)) {
-			layout_fix_offsets(w);
+			layout_fix_offsets(parent);
 			layout_fix_panes(w);
 			break;
 		}

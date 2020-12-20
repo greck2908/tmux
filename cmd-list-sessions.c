@@ -42,8 +42,8 @@ const struct cmd_entry cmd_list_sessions_entry = {
 	.name = "list-sessions",
 	.alias = "ls",
 
-	.args = { "F:f:", 0, 0 },
-	.usage = "[-F format] [-f filter]",
+	.args = { "F:", 0, 0 },
+	.usage = "[-F format]",
 
 	.flags = CMD_AFTERHOOK,
 	.exec = cmd_list_sessions_exec
@@ -52,35 +52,25 @@ const struct cmd_entry cmd_list_sessions_entry = {
 static enum cmd_retval
 cmd_list_sessions_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = cmd_get_args(self);
+	struct args		*args = self->args;
 	struct session		*s;
 	u_int		 	 n;
 	struct format_tree	*ft;
-	const char		*template, *filter;
-	char			*line, *expanded;
-	int			 flag;
+	const char		*template;
+	char			*line;
 
 	if ((template = args_get(args, 'F')) == NULL)
 		template = LIST_SESSIONS_TEMPLATE;
-	filter = args_get(args, 'f');
 
 	n = 0;
 	RB_FOREACH(s, sessions, &sessions) {
-		ft = format_create(cmdq_get_client(item), item, FORMAT_NONE, 0);
+		ft = format_create(item->client, item, FORMAT_NONE, 0);
 		format_add(ft, "line", "%u", n);
 		format_defaults(ft, NULL, s, NULL, NULL);
 
-		if (filter != NULL) {
-			expanded = format_expand(ft, filter);
-			flag = format_true(expanded);
-			free(expanded);
-		} else
-			flag = 1;
-		if (flag) {
-			line = format_expand(ft, template);
-			cmdq_print(item, "%s", line);
-			free(line);
-		}
+		line = format_expand(ft, template);
+		cmdq_print(item, "%s", line);
+		free(line);
 
 		format_free(ft);
 		n++;

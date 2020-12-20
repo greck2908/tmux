@@ -19,7 +19,6 @@
 #include <sys/types.h>
 
 #include <stdlib.h>
-#include <string.h>
 
 #include "tmux.h"
 
@@ -33,8 +32,8 @@ const struct cmd_entry cmd_select_pane_entry = {
 	.name = "select-pane",
 	.alias = "selectp",
 
-	.args = { "DdegLlMmP:RT:t:UZ", 0, 0 }, /* -P and -g deprecated */
-	.usage = "[-DdeLlMmRUZ] [-T title] " CMD_TARGET_PANE_USAGE,
+	.args = { "DdegLlMmP:RT:t:U", 0, 0 },
+	.usage = "[-DdegLlMmRU] [-P style] [-T title] " CMD_TARGET_PANE_USAGE,
 
 	.target = { 't', CMD_FIND_PANE, 0 },
 
@@ -46,8 +45,8 @@ const struct cmd_entry cmd_last_pane_entry = {
 	.name = "last-pane",
 	.alias = "lastp",
 
-	.args = { "det:Z", 0, 0 },
-	.usage = "[-deZ] " CMD_TARGET_WINDOW_USAGE,
+	.args = { "det:", 0, 0 },
+	.usage = "[-de] " CMD_TARGET_WINDOW_USAGE,
 
 	.target = { 't', CMD_FIND_WINDOW, 0 },
 
@@ -66,7 +65,7 @@ cmd_select_pane_redraw(struct window *w)
 	 */
 
 	TAILQ_FOREACH(c, &clients, entry) {
-		if (c->session == NULL || (c->flags & CLIENT_CONTROL))
+		if (c->session == NULL)
 			continue;
 		if (c->session->curw->window == w && tty_window_bigger(&c->tty))
 			server_redraw_client(c);
@@ -83,21 +82,17 @@ cmd_select_pane_redraw(struct window *w)
 static enum cmd_retval
 cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = cmd_get_args(self);
-	const struct cmd_entry	*entry = cmd_get_entry(self);
-	struct cmd_find_state	*current = cmdq_get_current(item);
-	struct cmd_find_state	*target = cmdq_get_target(item);
-	struct client		*c = cmdq_get_client(item);
-	struct winlink		*wl = target->wl;
+	struct args		*args = self->args;
+	struct cmd_find_state	*current = &item->shared->current;
+	struct client		*c = cmd_find_client(item, NULL, 1);
+	struct winlink		*wl = item->target.wl;
 	struct window		*w = wl->window;
-	struct session		*s = target->s;
-	struct window_pane	*wp = target->wp, *activewp, *lastwp, *markedwp;
-	struct options		*oo = wp->options;
-	char			*title;
+	struct session		*s = item->target.s;
+	struct window_pane	*wp = item->target.wp, *lastwp, *markedwp;
+	char			*pane_title;
 	const char		*style;
-	struct options_entry	*o;
 
-	if (entry == &cmd_last_pane_entry || args_has(args, 'l')) {
+	if (self->entry == &cmd_last_pane_entry || args_has(args, 'l')) {
 		lastwp = w->last;
 		if (lastwp == NULL && window_count_panes(w) == 2) {
 			lastwp = TAILQ_PREV(w->active, window_panes, entry);
@@ -108,20 +103,17 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 			cmdq_error(item, "no last pane");
 			return (CMD_RETURN_ERROR);
 		}
-		if (args_has(args, 'e'))
+		if (args_has(self->args, 'e'))
 			lastwp->flags &= ~PANE_INPUTOFF;
-		else if (args_has(args, 'd'))
+		else if (args_has(self->args, 'd'))
 			lastwp->flags |= PANE_INPUTOFF;
 		else {
-			if (window_push_zoom(w, args_has(args, 'Z')))
-				server_redraw_window(w);
+			server_unzoom_window(w);
 			window_redraw_active_switch(w, lastwp);
-			if (window_set_active_pane(w, lastwp, 1)) {
+			if (window_set_active_pane(w, lastwp)) {
 				cmd_find_from_winlink(current, wl, 0);
 				cmd_select_pane_redraw(w);
 			}
-			if (window_pop_zoom(w))
-				server_redraw_window(w);
 		}
 		return (CMD_RETURN_NORMAL);
 	}
@@ -129,10 +121,7 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 	if (args_has(args, 'm') || args_has(args, 'M')) {
 		if (args_has(args, 'm') && !window_pane_visible(wp))
 			return (CMD_RETURN_NORMAL);
-		if (server_check_marked())
-			lastwp = marked_pane.wp;
-		else
-			lastwp = NULL;
+		lastwp = marked_pane.wp;
 
 		if (args_has(args, 'M') || server_is_marked(s, wl, wp))
 			server_clear_marked();
@@ -151,78 +140,64 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 		return (CMD_RETURN_NORMAL);
 	}
 
-	style = args_get(args, 'P');
-	if (style != NULL) {
-		o = options_set_string(oo, "window-style", 0, "%s", style);
-		if (o == NULL) {
-			cmdq_error(item, "bad style: %s", style);
-			return (CMD_RETURN_ERROR);
+	if (args_has(self->args, 'P') || args_has(self->args, 'g')) {
+		if (args_has(args, 'P')) {
+			style = args_get(args, 'P');
+			if (style_parse(&grid_default_cell, &wp->colgc,
+			    style) == -1) {
+				cmdq_error(item, "bad style: %s", style);
+				return (CMD_RETURN_ERROR);
+			}
+			wp->flags |= PANE_REDRAW;
 		}
-		options_set_string(oo, "window-active-style", 0, "%s", style);
-		wp->flags |= (PANE_REDRAW|PANE_STYLECHANGED);
-	}
-	if (args_has(args, 'g')) {
-		cmdq_print(item, "%s", options_get_string(oo, "window-style"));
+		if (args_has(self->args, 'g'))
+			cmdq_print(item, "%s", style_tostring(&wp->colgc));
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (args_has(args, 'L')) {
-		window_push_zoom(w, 1);
+	if (args_has(self->args, 'L')) {
+		server_unzoom_window(wp->window);
 		wp = window_pane_find_left(wp);
-		window_pop_zoom(w);
-	} else if (args_has(args, 'R')) {
-		window_push_zoom(w, 1);
+	} else if (args_has(self->args, 'R')) {
+		server_unzoom_window(wp->window);
 		wp = window_pane_find_right(wp);
-		window_pop_zoom(w);
-	} else if (args_has(args, 'U')) {
-		window_push_zoom(w, 1);
+	} else if (args_has(self->args, 'U')) {
+		server_unzoom_window(wp->window);
 		wp = window_pane_find_up(wp);
-		window_pop_zoom(w);
-	} else if (args_has(args, 'D')) {
-		window_push_zoom(w, 1);
+	} else if (args_has(self->args, 'D')) {
+		server_unzoom_window(wp->window);
 		wp = window_pane_find_down(wp);
-		window_pop_zoom(w);
 	}
 	if (wp == NULL)
 		return (CMD_RETURN_NORMAL);
 
-	if (args_has(args, 'e')) {
+	if (args_has(self->args, 'e')) {
 		wp->flags &= ~PANE_INPUTOFF;
 		return (CMD_RETURN_NORMAL);
 	}
-	if (args_has(args, 'd')) {
+	if (args_has(self->args, 'd')) {
 		wp->flags |= PANE_INPUTOFF;
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (args_has(args, 'T')) {
-		title = format_single_from_target(item, args_get(args, 'T'));
-		if (screen_set_title(&wp->base, title)) {
-			notify_pane("pane-title-changed", wp);
-			server_redraw_window_borders(wp->window);
-			server_status_window(wp->window);
-		}
-		free(title);
+	if (args_has(self->args, 'T')) {
+		pane_title = format_single(item, args_get(self->args, 'T'),
+		    c, s, wl, wp);
+		screen_set_title(&wp->base, pane_title);
+		server_status_window(wp->window);
+		free(pane_title);
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (c != NULL && c->session != NULL && (c->flags & CLIENT_ACTIVEPANE))
-		activewp = server_client_get_pane(c);
-	else
-		activewp = w->active;
-	if (wp == activewp)
+	if (wp == w->active)
 		return (CMD_RETURN_NORMAL);
-	if (window_push_zoom(w, args_has(args, 'Z')))
-		server_redraw_window(w);
+	server_unzoom_window(wp->window);
 	window_redraw_active_switch(w, wp);
-	if (c != NULL && c->session != NULL && (c->flags & CLIENT_ACTIVEPANE))
-		server_client_set_pane(c, wp);
-	else if (window_set_active_pane(w, wp, 1))
+	if (window_set_active_pane(w, wp)) {
 		cmd_find_from_winlink_pane(current, wl, wp, 0);
-	cmdq_insert_hook(s, item, current, "after-select-pane");
-	cmd_select_pane_redraw(w);
-	if (window_pop_zoom(w))
-		server_redraw_window(w);
+		hooks_insert(s->hooks, item, current, "after-select-pane");
+		cmd_select_pane_redraw(w);
+	}
 
 	return (CMD_RETURN_NORMAL);
 }
